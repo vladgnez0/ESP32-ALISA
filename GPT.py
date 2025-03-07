@@ -1,7 +1,7 @@
 
 import asyncio
 import logging
-
+from sound import TextToSpeech
 from typing import Dict
 from functools import partial
 import re
@@ -18,6 +18,7 @@ class GPT:
         self.model = None
         self.history = ''
         self._load_model()
+        self.tts = TextToSpeech(language='ru')
 
     def _load_model(self):
         logger.info(f"===> Загрузка модели: {self.path_model} ...")
@@ -71,9 +72,21 @@ class GPT:
 
         # Поиск последнего вхождения @@ВТОРОЙ@@ и извлечение текста после него
         after_last_vtoroy = re.split(r'@@ВТОРОЙ@@', outputs[0])[-1].strip()
-        self.history += after_last_vtoroy
+
         logger.info(f"===> Обработанный ответ после последнего маркера @@ВТОРОЙ@@: {after_last_vtoroy}")
 
+        # Добавьте этот код после извлечения after_last_vtoroy
+        cleaned_text = re.sub(
+            r'[^а-яА-ЯёЁ\s\.,!?—\-()":;\n]',  # Разрешенные символы
+            '',
+            after_last_vtoroy
+        )
+
+        # Дополнительная очистка лишних пробелов
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+        self.history += cleaned_text
+
+        self.tts.text_to_mp3(cleaned_text)
         # Возвращаем уже очищенные результаты
         #return {'inputs': inputs, 'outputs': outputs, 'status': True, 'msg': ''}
-        return  after_last_vtoroy
+        return  cleaned_text

@@ -1,0 +1,267 @@
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <driver/i2s.h>
+#include "Arduino.h"
+#include <WiFiClient.h>
+#include <HTTPClient.h>
+
+// WiFi настройки
+const char* ssid = "Arduino";
+const char* password = "12345678";
+const String audio_stream_url = "http://192.168.137.1:7000/stream";
+// Сервер
+const char* serverIP = "192.168.137.1";  
+const int serverPort = 12345;
+// Объект для UDP
+WiFiUDP udp;
+// Глобальная переменная для аудиоданных
+int16_t samples[4000];  
+// Пины I²S для INMP441 (микрофон)
+#define I2S_MIC_WS   15  
+#define I2S_MIC_SCK  14  
+#define I2S_MIC_SD   32  
+// Пины I²S для динамика
+#define I2S_WS 26
+#define I2S_SCK 27
+#define I2S_SD 25
+// Настройка I2S для воспроизведения
+void setupI2S_Speaker() {
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = 16000,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 32,
+    .dma_buf_len = 1024,
+    .use_apll = true
+};
+  const i2s_pin_config_t pin_config = {
+      .bck_io_num = I2S_SCK,  
+      .ws_io_num = I2S_WS,
+      .data_out_num = I2S_SD, 
+      .data_in_num = I2S_PIN_NO_CHANGE
+  };
+
+  esp_err_t err = i2s_driver_install(I2S_NUM_1, &i2s_config, 0, NULL);
+  if (err != ESP_OK) {
+      Serial.printf("I2S установка ошибка: %d\n", err);
+      return;
+  }
+
+  err = i2s_set_pin(I2S_NUM_1, &pin_config);
+  if (err != ESP_OK) {
+      Serial.printf("I2S настройка пинов ошибка: %d\n", err);
+      return;
+  }
+
+  Serial.println("I2S для динамика настрое");
+}
+
+void setupI2S_Microphone() {
+  const i2s_config_t i2s_config = {
+      .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+      .sample_rate = 16000, 
+      .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+      .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+      .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+      .intr_alloc_flags = 0,
+      .dma_buf_count = 8,
+      .dma_buf_len = 1024,
+      .use_apll = false
+  };
+
+  const i2s_pin_config_t pin_config = {
+      .bck_io_num = I2S_MIC_SCK,
+      .ws_io_num = I2S_MIC_WS,
+      .data_out_num = I2S_PIN_NO_CHANGE,
+      .data_in_num = I2S_MIC_SD
+  };
+
+  // Установка драйвера I²S
+  esp_err_t err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  if (err != ESP_OK) {
+      Serial.printf("Ошибка установки драйвера I²S: %d\n", err);
+      return;
+  }
+
+  // Настройка пинов I²S
+  err = i2s_set_pin(I2S_NUM_0, &pin_config);
+  if (err != ESP_OK) {
+      Serial.printf("Ошибка настройки пинов I²S: %d\n", err);
+      return;
+  }
+
+  Serial.println("I²S для микрофона настроен успешно");
+}
+void audioTask(void *pvParameters) {
+  while (1) {
+      size_t bytes_read;
+
+      // Чтение данных с микрофона
+      esp_err_t err = i2s_read(I2S_NUM_0, &samples, sizeof(samples), &bytes_read, portMAX_DELAY);
+      if (err != ESP_OK) {
+          Serial.printf("Ошибка чтения I²S: %d\n", err);
+          continue;
+      }
+
+      // Отправка данных по UDP
+      udp.beginPacket(serverIP, serverPort);
+      udp.write((uint8_t*)samples, bytes_read);
+      udp.endPacket();
+
+      // Отладочный вывод
+      static uint32_t packet_counter = 0;
+      packet_counter++;
+      Serial.printf("Отправлено пакетов: %d\n", packet_counter);
+
+      // Задержка для освобождения процессора
+      vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+#include <math.h>
+
+// Параметры тестового сигнала
+#define TEST_TONE_FREQUENCY 1000   // Частота тестового сигнала (1000 Гц)
+#define SAMPLE_RATE 16000          // Частота дискретизации (16000 Гц)
+#define AMPLITUDE 3000             // Амплитуда тестового сигнала
+#define TEST_DURATION 2            // Длительность теста в секундах
+
+// Генерация синусоиды (тестового сигнала)
+void generateTestTone(int16_t *buffer, size_t bufferSize) {
+    static float phase = 0;
+    float phaseIncrement = (2 * M_PI * TEST_TONE_FREQUENCY) / SAMPLE_RATE;
+
+    for (size_t i = 0; i < bufferSize; i++) {
+        buffer[i] = (int16_t)(AMPLITUDE * sin(phase));  // Генерация синусоиды
+        phase += phaseIncrement;
+        if (phase > 2 * M_PI) phase -= 2 * M_PI;  // Ограничение фазы от 0 до 2π
+    }
+}
+
+// Тестирование динамика
+void testSpeaker() {
+  int16_t buffer[1024];  // Буфер для тестового сигнала
+
+  size_t samplesToSend = TEST_DURATION * SAMPLE_RATE;  // Общее количество сэмплов для теста
+  size_t samplesSent = 0;
+
+  while (samplesSent < samplesToSend) {
+      size_t bytesWritten;
+      size_t remainingSamples = samplesToSend - samplesSent;
+
+      // Генерация тестового сигнала
+      size_t samplesToWrite = min(sizeof(buffer) / sizeof(buffer[0]), remainingSamples);
+      generateTestTone(buffer, samplesToWrite);
+
+      // Отправка через I2S
+      esp_err_t err = i2s_write(I2S_NUM_1, buffer, samplesToWrite * sizeof(int16_t), &bytesWritten, portMAX_DELAY);
+      if (err != ESP_OK) {
+          Serial.printf("Ошибка воспроизведения через I2S: %d\n", err);
+          return;
+      }
+
+      samplesSent += samplesToWrite;
+      delay(100);  // Задержка для того, чтобы успеть воспроизвести сигнал
+  }
+  i2s_zero_dma_buffer(I2S_NUM_1);
+  Serial.println("Тест динамика завершен!");
+}
+// Размер буфера для аудио данных
+#define AUDIO_BUFFER_SIZE 2048
+uint8_t audioBuffer[AUDIO_BUFFER_SIZE];
+int audioBufferHead = 0;
+int audioBufferTail = 0;
+bool isBufferFull = false;
+// Функция для уменьшения громкости
+void reduceVolume(int16_t* buffer, int length, float factor) {
+  for (int i = 0; i < length; i++) {
+    buffer[i] = (int16_t)(buffer[i] * factor);  // Уменьшаем громкость на factor
+  }
+}
+WiFiClient client;
+// Функция для передачи аудио через I2S
+void playAudioStream() {
+  // Подключение к серверу через TCP
+  if (!client.connect(serverIP, serverPort)) {
+    Serial.println("Не удалось подключиться к серверу!");
+    return;
+  }
+
+  Serial.println("Подключение к серверу установлено.");
+
+  while (client.connected()) {
+    // Чтение данных из TCP потока
+    if (audioBufferHead == audioBufferTail && !isBufferFull) {
+      int bytesRead = client.read(audioBuffer + audioBufferHead, AUDIO_BUFFER_SIZE - audioBufferHead);
+      if (bytesRead > 0) {
+        audioBufferHead += bytesRead;
+        if (audioBufferHead == AUDIO_BUFFER_SIZE) {
+          isBufferFull = true;
+          audioBufferHead = 0;
+        }
+      }
+    }
+
+    // Передача данных в I2S, если буфер не пуст
+    if (audioBufferHead != audioBufferTail || isBufferFull) {
+      int bytesToSend = (audioBufferHead > audioBufferTail) ? audioBufferHead - audioBufferTail : AUDIO_BUFFER_SIZE - audioBufferTail;
+
+      reduceVolume((int16_t*)(audioBuffer + audioBufferTail), bytesToSend / sizeof(int16_t), 0.5);
+
+      size_t bytesWritten;
+      esp_err_t err = i2s_write(I2S_NUM_1, audioBuffer + audioBufferTail, bytesToSend, &bytesWritten, portMAX_DELAY);
+
+      if (err != ESP_OK) {
+        Serial.printf("Ошибка воспроизведения через I2S: %d\n", err);
+        break;
+      }
+
+      audioBufferTail += bytesToSend;
+      if (audioBufferTail == AUDIO_BUFFER_SIZE) {
+        audioBufferTail = 0;
+      }
+
+      if (audioBufferHead == audioBufferTail) {
+        isBufferFull = false;
+      }
+    }
+
+    delay(10);  // Небольшая задержка для предотвращения перегрузки
+  }
+
+  client.stop();
+  Serial.println("Соединение закрыто.");
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Подключение к WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected!");
+
+  // Настройка I²S для микрофона и динамика
+  setupI2S_Microphone();
+    // Настройка I²S для динамика
+    setupI2S_Speaker();
+    testSpeaker();
+
+
+
+  // Запуск задачи для записи и отправки аудио
+  //xTaskCreatePinnedToCore(audioTask, "audioTask", 4096, NULL, 2, NULL, 1); // Приоритет 2
+  playAudioStream();
+
+} 
+
+
+
+void loop() {
+
+}

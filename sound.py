@@ -14,7 +14,8 @@ class TextToSpeech:
         if self.language == 'ru':
             # Выбираем русский голос
             for voice in voices:
-                if 'ru' in voice.languages:
+
+                if 'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech\Voices\Tokens\TTS_MS_RU-RU_IRINA_11.0' in voice.id:
                     self.engine.setProperty('voice', voice.id)
                     break
         else:
@@ -42,7 +43,7 @@ class TextToSpeech:
         audio.export(output_filename, format="mp3")
 
         # Удаляем временный файл
-        os.remove(temp_wav)
+        #os.remove(temp_wav)
 
         return output_filename
 
