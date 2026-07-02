@@ -1,32 +1,91 @@
-
 import asyncio
 import logging
-from sound import TextToSpeech
-from typing import Dict
-from functools import partial
 import re
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from functools import partial
+from typing import Optional
 
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "model", "gpt")
 # Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+
 class GPT:
-    def __init__(self):
-        self.path_model = 'tinkoff-ai/ruDialoGPT-medium'
-        self.tokenizer = None
-        self.model = None
-        self.history = ''
+    """
+    Обёртка над моделью из transformers, заточенная под диалог на русском.
+    """
+
+    def __init__(self, model_name: str = "model/gptmedium"):
+        # Здесь можно указать ваш путь к локальной модели
+        self.path_model = model_name
+        self.tokenizer: Optional[AutoTokenizer] = None
+        self.model: Optional[AutoModelForCausalLM] = None
+        self.history: str = ""
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def extract_cube_word(self, text: str) -> str:
+        """
+        Удаляет слово 'кубик' (во всех падежах) из текста.
+        """
+        pattern = r"\bкубик(?:а|у|ом|е|и|ов|ам|ами|ах)?\b"
+        return text #re.sub(pattern, "", text, flags=re.IGNORECASE)
+
+    def _clean_text(self, text: str) -> str:
+        """
+        Очищает текст от лишних символов, оставляя только разумный набор.
+        """
+        text = re.sub(r'[^а-яА-ЯёЁa-zA-Z0-9\s\.,!?—\-()":;\n]', "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    def _load_model(self) -> None:
+        """
+        Ленивая загрузка модели и токенизатора (ТОЛЬКО офлайн).
+        """
+        if self.tokenizer is not None and self.model is not None:
+            return
+
+        import os
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+
+        # Нормализуем путь (на случай относительного)
+        local_path = os.path.abspath(self.path_model)
+
+        # Быстрая проверка, что это реально папка с моделью
+        if not os.path.isdir(local_path):
+            raise FileNotFoundError(f"Папка модели не найдена: {local_path}")
+
+        logger.info(f"===> Офлайн-загрузка модели из: {local_path}")
+
+        try:
+            # local_files_only=True запрещает любые обращения в интернет
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                local_path,
+                local_files_only=True
+            )
+            self.model = AutoModelForCausalLM.from_pretrained(
+                local_path,
+                local_files_only=True
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Не удалось загрузить модель ОФЛАЙН. "
+                "Проверь, что в папке есть как минимум config.json и веса (pytorch_model.bin или *.safetensors), "
+                "а также файлы токенизатора (tokenizer.json или vocab.json/merges.txt). "
+                f"Путь: {local_path}. Ошибка: {e}"
+            )
+
+        self.model.to(self.device)
+        self.model.eval()
+        logger.info("===> Модель успешно загружена (offline)")
+
+    async def get_responses(self, inputs):
         self._load_model()
-        self.tts = TextToSpeech(language='ru')
-
-    def _load_model(self):
-        logger.info(f"===> Загрузка модели: {self.path_model} ...")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.path_model)
-        self.model = AutoModelForCausalLM.from_pretrained(self.path_model)
-        logger.info("===> Модель успешно загружена")
-
-    async def get_responses(self, inputs: Dict) -> Dict:
         print(inputs)
         inputs_text = inputs
         print(inputs_text)
@@ -86,7 +145,6 @@ class GPT:
         cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
         self.history += cleaned_text
 
-        self.tts.text_to_mp3(cleaned_text)
         # Возвращаем уже очищенные результаты
         #return {'inputs': inputs, 'outputs': outputs, 'status': True, 'msg': ''}
         return  cleaned_text

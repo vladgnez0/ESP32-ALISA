@@ -1,56 +1,59 @@
-import pyttsx3
-from pydub import AudioSegment
+# sound.py — Piper TTS (стабильный, офлайн)
+import subprocess
 import os
-
+import tempfile
 
 class TextToSpeech:
-    def __init__(self, language='en'):
-        self.language = language
-        self.engine = pyttsx3.init()
+    """
+    Drop-in TTS.
+    Совместим с твоим service.py:
+    text_to_mp3(text, "temp.wav")
+    """
 
-    def set_language(self):
-        # Устанавливаем язык для синтезатора
-        voices = self.engine.getProperty('voices')
-        if self.language == 'ru':
-            # Выбираем русский голос
-            for voice in voices:
+    def __init__(self, language: str = "ru"):
+        base_dir = os.path.dirname(__file__)
 
-                if 'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech\Voices\Tokens\TTS_MS_RU-RU_IRINA_11.0' in voice.id:
-                    self.engine.setProperty('voice', voice.id)
-                    break
-        else:
-            # Для других языков, например, английский
-            self.engine.setProperty('voice', voices[1].id)
+        self.piper_exe = os.path.join(base_dir, "piper", "piper.exe")
+        self.model = os.path.join(
+            base_dir,
+            "piper",
+            "models",
+            "ru-irinia-medium.onnx"  # ← если модель другая — поменяй имя
+        )
 
-    def text_to_mp3(self, text, output_filename="output.mp3"):
-        """
-        Преобразует текст в аудиофайл MP3 локально.
+        if not os.path.exists(self.piper_exe):
+            raise FileNotFoundError(f"Piper не найден: {self.piper_exe}")
+        if not os.path.exists(self.model):
+            raise FileNotFoundError(f"Модель не найдена: {self.model}")
 
-        :param text: Текст для синтеза речи.
-        :param output_filename: Имя выходного файла.
-        :return: Путь к сохраненному MP3 файлу.
-        """
-        # Устанавливаем язык
-        self.set_language()
+    def text_to_mp3(self, text: str, output_filename: str = "temp.wav") -> str:
+        text = (text or "").strip()
+        if not text:
+            text = "Скажи ещё раз, пожалуйста."
 
-        # Сохраняем аудиофайл во временный wav
-        temp_wav = "temp.wav"
-        self.engine.save_to_file(text, temp_wav)
-        self.engine.runAndWait()
+        # Piper принимает текст через stdin
+        cmd = [
+            self.piper_exe,
+            "-m", self.model,
+            "-f", output_filename
+        ]
 
-        # Преобразуем wav в mp3 с помощью pydub
-        audio = AudioSegment.from_wav(temp_wav)
-        audio.export(output_filename, format="mp3")
+        proc = subprocess.run(
+            cmd,
+            input=text.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
 
-        # Удаляем временный файл
-        #os.remove(temp_wav)
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="ignore")
+            raise RuntimeError(f"Piper error: {err}")
 
         return output_filename
 
 
-# Пример использования
+# Быстрый тест
 if __name__ == "__main__":
-    tts = TextToSpeech(language='ru')  # Для русского языка
-    text = "Привет, это пример локального синтеза речи на Python!"
-    output_file = tts.text_to_mp3(text, "local_speech.mp3")
-    print(f"MP3 файл сохранен как {output_file}")
+    tts = TextToSpeech()
+    tts.text_to_mp3("Привет! Это тест Piper.", "test.wav")
+    print("OK")
